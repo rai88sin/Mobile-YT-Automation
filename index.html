@@ -22,6 +22,28 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        /* Modal styles */
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0,0,0,0.6);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: #161b22;
+            padding: 20px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -57,18 +79,49 @@
             const [facebookCaption, setFacebookCaption] = useState('');
             
             const [showInitialOutput, setShowInitialOutput] = useState(false);
+            const [history, setHistory] = useState([]);
+            const [isHistoryVisible, setIsHistoryVisible] = useState(false);
+            const [currentHistoryId, setCurrentHistoryId] = useState(null);
             
             const copyButtonRefs = useRef({});
 
-            // --- Load API Key on App Start ---
+            // --- Helper to load state from a history item ---
+            const loadStateFromItem = (item) => {
+                if (!item) return;
+                setChannelBio(item.channelBio);
+                setVideoTopic(item.videoTopic);
+                setScript(item.script);
+                setYtTitle(item.ytTitle);
+                setYtDescription(item.ytDescription);
+                setYtTags(item.ytTags);
+                setTiktokCaption(item.tiktokCaption);
+                setFacebookCaption(item.facebookCaption);
+                setCurrentHistoryId(item.id);
+                setShowInitialOutput(!!item.script || !!item.ytTitle);
+            };
+
+            // --- Load API Key & Last Session on App Start ---
             useEffect(() => {
                 const savedKey = localStorage.getItem('geminiApiKey');
-                if (savedKey) {
-                    setApiKey(savedKey);
+                if (savedKey) setApiKey(savedKey);
+
+                const savedHistory = localStorage.getItem('aiContentHistory');
+                if (savedHistory) {
+                    const parsedHistory = JSON.parse(savedHistory);
+                    setHistory(parsedHistory);
+                    if (parsedHistory.length > 0) {
+                        loadStateFromItem(parsedHistory[0]); // Load the most recent item
+                    }
                 }
             }, []);
 
-            // --- Handlers ---
+            // --- Save History whenever it changes ---
+            useEffect(() => {
+                if (history.length > 0 || localStorage.getItem('aiContentHistory')) {
+                    localStorage.setItem('aiContentHistory', JSON.stringify(history));
+                }
+            }, [history]);
+
             const handleClearKey = () => {
                 localStorage.removeItem('geminiApiKey');
                 setApiKey('');
@@ -86,14 +139,35 @@
                 setError(null);
                 return true;
             };
+
+            const createOrUpdateHistory = (updates) => {
+                setHistory(prev => {
+                    const existingIndex = prev.findIndex(item => item.id === currentHistoryId);
+                    if (existingIndex !== -1) {
+                        const updatedHistory = [...prev];
+                        updatedHistory[existingIndex] = { ...updatedHistory[existingIndex], ...updates };
+                        return updatedHistory;
+                    } else {
+                        const newId = Date.now();
+                        const newEntry = {
+                            id: newId,
+                            channelBio,
+                            videoTopic,
+                            script: '', ytTitle: '', ytDescription: '', ytTags: '', tiktokCaption: '', facebookCaption: '',
+                            ...updates
+                        };
+                        setCurrentHistoryId(newId);
+                        return [newEntry, ...prev];
+                    }
+                });
+            };
             
-            // --- Initial Generation (Script & Title) ---
             const handleGenerateInitial = async () => {
                 if (!checkCommonErrors()) return;
                 
                 localStorage.setItem('geminiApiKey', apiKey);
                 setLoadingStates(prev => ({ ...prev, initial: true }));
-                setShowInitialOutput(false);
+                setCurrentHistoryId(null); // Reset to create a new history entry
 
                 try {
                     const prompt = `
@@ -105,18 +179,12 @@
                         Channel Bio: "${channelBio}"
                         Video Topic: "${videoTopic}"
                     `;
-                    const schema = {
-                        type: "OBJECT",
-                        properties: {
-                            youtube_script: { type: "STRING" },
-                            youtube_shorts_title: { type: "STRING" }
-                        },
-                        required: ["youtube_script", "youtube_shorts_title"]
-                    };
+                    const schema = { type: "OBJECT", properties: { youtube_script: { type: "STRING" }, youtube_shorts_title: { type: "STRING" } }, required: ["youtube_script", "youtube_shorts_title"] };
                     
                     const data = await callGeminiAPI(prompt, schema);
                     setScript(data.youtube_script);
                     setYtTitle(data.youtube_shorts_title);
+                    createOrUpdateHistory({ script: data.youtube_script, ytTitle: data.youtube_shorts_title });
                     setShowInitialOutput(true);
 
                 } catch (e) {
@@ -126,128 +194,67 @@
                 }
             };
             
-            // --- Description Generation ---
-            const handleGenerateDescription = async () => {
+            const generateAndSave = async (type, prompt, schema, stateSetter, historyKey) => {
                 if (!checkCommonErrors()) return;
-                setLoadingStates(prev => ({ ...prev, description: true }));
+                setLoadingStates(prev => ({ ...prev, [type]: true }));
 
                 try {
-                     const prompt = `
-                        Based on the Channel Bio and Video Topic, generate a full, SEO-dominant YouTube video description. It must include relevant hashtags and emojis to maximize engagement and visibility.
-
-                        Channel Bio: "${channelBio}"
-                        Video Topic: "${videoTopic}"
-                    `;
-                    const schema = {
-                        type: "OBJECT",
-                        properties: { youtube_description: { type: "STRING" } },
-                        required: ["youtube_description"]
-                    };
                     const data = await callGeminiAPI(prompt, schema);
-                    setYtDescription(data.youtube_description);
+                    const content = data[historyKey];
+                    stateSetter(content);
+                    createOrUpdateHistory({ [historyKey]: content });
                 } catch (e) {
                     setError(e.message);
                 } finally {
-                    setLoadingStates(prev => ({ ...prev, description: false }));
+                    setLoadingStates(prev => ({ ...prev, [type]: false }));
                 }
             };
 
-            // --- Tags Generation ---
-            const handleGenerateTags = async () => {
-                if (!checkCommonErrors()) return;
-                setLoadingStates(prev => ({ ...prev, tags: true }));
-                
-                try {
-                    const prompt = `
-                        Based on the Channel Bio and Video Topic, generate a list of SEO-dominant YouTube tags. The tags should be separated by commas and must NOT include the '#' symbol.
-
-                        Channel Bio: "${channelBio}"
-                        Video Topic: "${videoTopic}"
-                    `;
-                    const schema = {
-                        type: "OBJECT",
-                        properties: { youtube_tags: { type: "STRING" } },
-                        required: ["youtube_tags"]
-                    };
-                    const data = await callGeminiAPI(prompt, schema);
-                    setYtTags(data.youtube_tags);
-                } catch (e) {
-                    setError(e.message);
-                } finally {
-                    setLoadingStates(prev => ({ ...prev, tags: false }));
-                }
+            const handleGenerateDescription = () => {
+                const prompt = `Based on the Channel Bio and Video Topic, generate a full, SEO-dominant YouTube video description. It must include relevant hashtags and emojis to maximize engagement and visibility.\n\nChannel Bio: "${channelBio}"\nVideo Topic: "${videoTopic}"`;
+                const schema = { type: "OBJECT", properties: { youtube_description: { type: "STRING" } }, required: ["youtube_description"] };
+                generateAndSave('description', prompt, schema, setYtDescription, 'youtube_description');
             };
 
-            // --- Social Captions Generation ---
+            const handleGenerateTags = () => {
+                const prompt = `Based on the Channel Bio and Video Topic, generate a list of SEO-dominant YouTube tags. The tags should be separated by commas and must NOT include the '#' symbol.\n\nChannel Bio: "${channelBio}"\nVideo Topic: "${videoTopic}"`;
+                const schema = { type: "OBJECT", properties: { youtube_tags: { type: "STRING" } }, required: ["youtube_tags"] };
+                generateAndSave('tags', prompt, schema, setYtTags, 'youtube_tags');
+            };
+
             const handleGenerateSocialCaptions = async () => {
                 if (!checkCommonErrors()) return;
                 setLoadingStates(prev => ({ ...prev, social: true }));
-
                 try {
-                     const prompt = `
-                        Based on the Channel Bio and Video Topic, generate two items:
-                        1. A catchy TikTok caption with relevant emojis and exactly 5 SEO-dominant hashtags.
-                        2. An engaging Facebook caption with relevant emojis and exactly 5 SEO-dominant hashtags.
-
-                        Channel Bio: "${channelBio}"
-                        Video Topic: "${videoTopic}"
-                    `;
-                    const schema = {
-                        type: "OBJECT",
-                        properties: { 
-                            tiktok_caption: { type: "STRING" },
-                            facebook_caption: { type: "STRING" }
-                        },
-                        required: ["tiktok_caption", "facebook_caption"]
-                    };
+                    const prompt = `Based on the Channel Bio and Video Topic, generate two items:\n1. A catchy TikTok caption with relevant emojis and exactly 5 SEO-dominant hashtags.\n2. An engaging Facebook caption with relevant emojis and exactly 5 SEO-dominant hashtags.\n\nChannel Bio: "${channelBio}"\nVideo Topic: "${videoTopic}"`;
+                    const schema = { type: "OBJECT", properties: { tiktok_caption: { type: "STRING" }, facebook_caption: { type: "STRING" } }, required: ["tiktok_caption", "facebook_caption"] };
                     const data = await callGeminiAPI(prompt, schema);
                     setTiktokCaption(data.tiktok_caption);
                     setFacebookCaption(data.facebook_caption);
+                    createOrUpdateHistory({ tiktok_caption: data.tiktok_caption, facebook_caption: data.facebook_caption });
                 } catch (e) {
                     setError(e.message);
                 } finally {
-                    setLoadingStates(prev => ({ ...prev, social: false }));
+                    setLoadingStates(prev => ({...prev, social: false }));
                 }
             };
 
-            // --- Reusable API Call Function ---
             const callGeminiAPI = async (prompt, schema) => {
                 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
-                const payload = {
-                    contents: [{ role: "user", parts: [{ text: prompt }] }],
-                    generationConfig: {
-                        responseMimeType: "application/json",
-                        responseSchema: schema
-                    }
-                };
-
-                const response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
+                const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", responseSchema: schema } };
+                const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                 if (!response.ok) {
                     let errorDetails = `API Error: ${response.status}`;
-                    try {
-                        const errorData = await response.json();
-                        if (errorData?.error?.message) {
-                            errorDetails += ` - ${errorData.error.message}`;
-                        }
-                    } catch (e) { /* Ignore */ }
+                    try { const errorData = await response.json(); if (errorData?.error?.message) errorDetails += ` - ${errorData.error.message}`; } catch (e) { /* Ignore */ }
                     throw new Error(errorDetails);
                 }
-
                 const result = await response.json();
-                
-                if (result.candidates && result.candidates.length > 0) {
-                    return JSON.parse(result.candidates[0].content.parts[0].text);
-                } else {
-                    throw new Error("The AI did not return any content.");
-                }
+                if (result.candidates && result.candidates.length > 0) return JSON.parse(result.candidates[0].content.parts[0].text);
+                throw new Error("The AI did not return any content.");
             };
             
             const copyToClipboard = (text, type) => {
+                if (!text) return;
                 const textArea = document.createElement('textarea');
                 textArea.value = text;
                 document.body.appendChild(textArea);
@@ -255,102 +262,81 @@
                 try {
                     document.execCommand('copy');
                     const button = copyButtonRefs.current[type];
-                    if(button) {
+                    if (button) {
                         const originalText = button.innerHTML;
                         button.innerHTML = '<i class="fas fa-check mr-2"></i>Copied!';
-                        setTimeout(() => {
-                           button.innerHTML = originalText;
-                        }, 2000);
+                        setTimeout(() => { button.innerHTML = originalText; }, 2000);
                     }
-                } catch (err) {
-                    console.error('Fallback: Oops, unable to copy', err);
-                }
+                } catch (err) { console.error('Fallback: Oops, unable to copy', err); }
                 document.body.removeChild(textArea);
             };
+            
+            const loadFromHistoryClick = (item) => {
+                loadStateFromItem(item);
+                setIsHistoryVisible(false);
+            };
+
+            const HistoryModal = () => (
+                <div className="modal-backdrop">
+                    <div className="modal-content">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-2xl font-bold text-white">History</h2>
+                            <button onClick={() => setIsHistoryVisible(false)} className="text-gray-400 hover:text-white text-2xl">&times;</button>
+                        </div>
+                        <div className="space-y-3">
+                            {history.length > 0 ? history.map(item => (
+                                <div key={item.id} onClick={() => loadFromHistoryClick(item)} className="bg-[#0d1117] p-3 rounded-lg cursor-pointer hover:bg-[#21262d]">
+                                    <p className="font-bold text-white truncate">{item.videoTopic}</p>
+                                    <p className="text-xs text-gray-400">{new Date(item.id).toLocaleString()}</p>
+                                </div>
+                            )) : <p className="text-gray-400 text-center">No history yet.</p>}
+                        </div>
+                    </div>
+                </div>
+            );
 
             const OutputBox = ({ title, icon, content, copyLabel }) => (
                 <div className="bg-[#161b22] rounded-xl p-4 mb-4">
-                    <h3 className="text-xl font-bold text-[#c9d1d9] mb-2 flex items-center">
-                        <i className={`fas ${icon} mr-3`}></i>{title}
-                    </h3>
-                    <div className="bg-[#0d1117] rounded-lg p-3 min-h-[100px] max-h-52 overflow-y-auto mb-3">
-                        <p className="text-[#e6edf3] text-sm whitespace-pre-wrap">{content}</p>
-                    </div>
-                    <button 
-                        ref={el => copyButtonRefs.current[copyLabel] = el}
-                        className="bg-[#21262d] text-[#c9d1d9] font-semibold w-full py-2 px-4 rounded-lg hover:bg-[#30363d] transition-colors"
-                        onClick={() => copyToClipboard(content, copyLabel)}
-                        disabled={!content}
-                    >
-                        <i className="fas fa-copy mr-2"></i>Copy {copyLabel}
-                    </button>
+                    <h3 className="text-xl font-bold text-[#c9d1d9] mb-2 flex items-center"><i className={`fas ${icon} mr-3`}></i>{title}</h3>
+                    <div className="bg-[#0d1117] rounded-lg p-3 min-h-[100px] max-h-52 overflow-y-auto mb-3"><p className="text-[#e6edf3] text-sm whitespace-pre-wrap">{content}</p></div>
+                    <button ref={el => copyButtonRefs.current[copyLabel] = el} className="bg-[#21262d] text-[#c9d1d9] font-semibold w-full py-2 px-4 rounded-lg hover:bg-[#30363d] transition-colors disabled:opacity-50" onClick={() => copyToClipboard(content, copyLabel)} disabled={!content}><i className="fas fa-copy mr-2"></i>Copy {copyLabel}</button>
                 </div>
             );
 
             return (
                 <div className="min-h-screen bg-[#0d1117] text-white p-4">
+                    {isHistoryVisible && <HistoryModal />}
                     <div className="max-w-2xl mx-auto">
-                        <header className="text-center mb-6">
+                        <header className="text-center mb-6 relative">
                             <h1 className="text-3xl md:text-4xl font-bold text-[#e6edf3]">AI Social Content Automator</h1>
                             <p className="text-md text-[#8b949e] mt-2">Generate SEO-optimized content for your videos.</p>
+                            <button onClick={() => setIsHistoryVisible(true)} className="absolute top-0 right-0 bg-gray-700 hover:bg-gray-600 text-white font-bold w-10 h-10 flex items-center justify-center rounded-full">
+                                <i className="fas fa-history"></i>
+                            </button>
                         </header>
 
                         {/* --- Inputs --- */}
                         <div className="bg-[#161b22] rounded-xl p-4 mb-4">
                             <label className="text-lg font-semibold text-[#c9d1d9] mb-2 flex items-center"><i className="fas fa-key mr-2"></i>Your Gemini API Key</label>
-                            <div className="relative flex items-center">
-                                <input
-                                    type={isApiKeyVisible ? 'text' : 'password'}
-                                    className="w-full bg-[#0d1117] text-[#e6edf3] p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none pr-10"
-                                    placeholder="Enter your Gemini API Key"
-                                    value={apiKey}
-                                    onChange={(e) => setApiKey(e.target.value)}
-                                />
-                                <button onClick={() => setIsApiKeyVisible(!isApiKeyVisible)} className="absolute right-2 text-gray-400 hover:text-white">
-                                    <i className={`fas ${isApiKeyVisible ? 'fa-eye-slash' : 'fa-eye'}`}></i>
-                                </button>
-                            </div>
-                            <div className="flex flex-col sm:flex-row justify-between sm:items-center mt-2">
-                                <p className="text-xs text-[#8b949e] mb-2 sm:mb-0">Get yours from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">Google AI Studio</a></p>
-                                <button onClick={handleClearKey} className="text-red-400 hover:text-red-300 text-xs font-semibold self-start sm:self-auto">Clear Key</button>
-                            </div>
+                            <div className="relative flex items-center"><input type={isApiKeyVisible ? 'text' : 'password'} className="w-full bg-[#0d1117] text-[#e6edf3] p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none pr-10" placeholder="Enter your Gemini API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} /><button onClick={() => setIsApiKeyVisible(!isApiKeyVisible)} className="absolute right-2 text-gray-400 hover:text-white"><i className={`fas ${isApiKeyVisible ? 'fa-eye-slash' : 'fa-eye'}`}></i></button></div>
+                            <div className="flex flex-col sm:flex-row justify-between sm:items-center mt-2"><p className="text-xs text-[#8b949e] mb-2 sm:mb-0">Get yours from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">Google AI Studio</a></p><button onClick={handleClearKey} className="text-red-400 hover:text-red-300 text-xs font-semibold self-start sm:self-auto">Clear Key</button></div>
                         </div>
                         <div className="bg-[#161b22] rounded-xl p-4 mb-4">
                             <label className="text-lg font-semibold text-[#c9d1d9] mb-2 flex items-center"><i className="fas fa-user-circle mr-2"></i>Channel Bio & Niche</label>
-                            <textarea
-                                className="w-full bg-[#0d1117] text-[#e6edf3] p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none h-24"
-                                placeholder="e.g., 'My channel explores the latest in AI...'"
-                                value={channelBio}
-                                onChange={(e) => setChannelBio(e.target.value)}
-                                maxLength={BIO_LIMIT}
-                            />
+                            <textarea className="w-full bg-[#0d1117] text-[#e6edf3] p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none h-24" placeholder="e.g., 'My channel explores the latest in AI...'" value={channelBio} onChange={(e) => setChannelBio(e.target.value)} maxLength={BIO_LIMIT} />
                             <div className="text-right text-xs text-gray-400 mt-1">{channelBio.length} / {BIO_LIMIT}</div>
                         </div>
                         <div className="bg-[#161b22] rounded-xl p-4 mb-4">
                             <label className="text-lg font-semibold text-[#c9d1d9] mb-2 flex items-center"><i className="fas fa-video mr-2"></i>Video Topic & Subject</label>
-                            <textarea
-                                className="w-full bg-[#0d1117] text-[#e6edf3] p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none h-24"
-                                placeholder="e.g., 'A 1-minute video on how GPT-4 helps...'"
-                                value={videoTopic}
-                                onChange={(e) => setVideoTopic(e.target.value)}
-                                maxLength={TOPIC_LIMIT}
-                            />
+                            <textarea className="w-full bg-[#0d1117] text-[#e6edf3] p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none h-24" placeholder="e.g., 'A 1-minute video on how GPT-4 helps...'" value={videoTopic} onChange={(e) => setVideoTopic(e.target.value)} maxLength={TOPIC_LIMIT} />
                             <div className="text-right text-xs text-gray-400 mt-1">{videoTopic.length} / {TOPIC_LIMIT}</div>
                         </div>
                         
-                        {/* --- Error Display --- */}
-                        {error && (
-                            <div className="bg-red-900 border border-red-700 text-red-200 px-4 py-3 rounded-lg my-4 text-center">
-                                <strong className="font-bold">Oops! </strong>
-                                <span className="block sm:inline">{error}</span>
-                            </div>
-                        )}
+                        {error && <div className="bg-red-900 border border-red-700 text-red-200 px-4 py-3 rounded-lg my-4 text-center"><strong className="font-bold">Oops! </strong><span className="block sm:inline">{error}</span></div>}
 
-                        {/* --- Initial Generation --- */}
-                        <button onClick={handleGenerateInitial} disabled={loadingStates.initial} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-full text-lg shadow-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                            {loadingStates.initial ? 'Generating...' : 'Generate Script & Title'}
-                        </button>
+                        <button onClick={handleGenerateInitial} disabled={loadingStates.initial} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-full text-lg shadow-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">{loadingStates.initial ? 'Generating...' : 'Generate Script & Title'}</button>
                         {loadingStates.initial && <div className="flex justify-center my-4"><div className="loader ease-linear rounded-full border-4 border-t-4 border-gray-600 h-12 w-12"></div></div>}
+                        
                         {showInitialOutput && (
                             <div className="mt-6">
                                 <OutputBox title="1-Minute YouTube Script" icon="fa-scroll" content={script} copyLabel="Script" />
@@ -360,27 +346,20 @@
                         
                         <hr className="my-8 border-gray-700" />
 
-                        {/* --- Secondary Generations --- */}
                         <div className="bg-[#161b22] rounded-xl p-4 mb-4">
-                            <button onClick={handleGenerateDescription} disabled={loadingStates.description} className="w-full bg-green-700 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-full text-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                                {loadingStates.description ? 'Generating...' : 'Generate Description'}
-                            </button>
+                            <button onClick={handleGenerateDescription} disabled={loadingStates.description} className="w-full bg-green-700 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-full text-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed">{loadingStates.description ? 'Generating...' : 'Generate Description'}</button>
                             {loadingStates.description && <div className="flex justify-center mt-4"><div className="loader ease-linear rounded-full border-2 border-t-2 border-gray-600 h-6 w-6"></div></div>}
                             {ytDescription && <OutputBox title="YouTube Description" icon="fa-align-left" content={ytDescription} copyLabel="Description" />}
                         </div>
 
                         <div className="bg-[#161b22] rounded-xl p-4 mb-4">
-                            <button onClick={handleGenerateTags} disabled={loadingStates.tags} className="w-full bg-green-700 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-full text-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                                {loadingStates.tags ? 'Generating...' : 'Generate Tags'}
-                            </button>
+                            <button onClick={handleGenerateTags} disabled={loadingStates.tags} className="w-full bg-green-700 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-full text-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed">{loadingStates.tags ? 'Generating...' : 'Generate Tags'}</button>
                             {loadingStates.tags && <div className="flex justify-center mt-4"><div className="loader ease-linear rounded-full border-2 border-t-2 border-gray-600 h-6 w-6"></div></div>}
                             {ytTags && <OutputBox title="YouTube Tags" icon="fa-tags" content={ytTags} copyLabel="Tags" />}
                         </div>
 
                         <div className="bg-[#161b22] rounded-xl p-4 mb-4">
-                            <button onClick={handleGenerateSocialCaptions} disabled={loadingStates.social} className="w-full bg-purple-700 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded-full text-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                                {loadingStates.social ? 'Generating...' : 'Generate Social Captions'}
-                            </button>
+                            <button onClick={handleGenerateSocialCaptions} disabled={loadingStates.social} className="w-full bg-purple-700 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded-full text-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed">{loadingStates.social ? 'Generating...' : 'Generate Social Captions'}</button>
                             {loadingStates.social && <div className="flex justify-center mt-4"><div className="loader ease-linear rounded-full border-2 border-t-2 border-gray-600 h-6 w-6"></div></div>}
                             {tiktokCaption && <OutputBox title="TikTok Caption" icon="fa-brands fa-tiktok" content={tiktokCaption} copyLabel="TikTok Caption" />}
                             {facebookCaption && <OutputBox title="Facebook Caption" icon="fa-brands fa-facebook" content={facebookCaption} copyLabel="Facebook Caption" />}
